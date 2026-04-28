@@ -196,14 +196,49 @@ func (r *Retriever) Search(ctx context.Context, query string, opts lore.SearchOp
 			}
 			return nil, fmt.Errorf("hybrid: hydrate entry %d: %w", scored.ID, err)
 		}
-		// Post-filter by project when specified.
+		// Post-filter by Project, Kinds, and Tags. The vector arm does not
+		// honor these filters natively (its SearchOpts hints are advisory),
+		// so the Retriever applies them after hydration to satisfy the
+		// caller's contract. The BM25 arm's results may already be filtered;
+		// re-applying here is a no-op for those.
 		if opts.Project != "" && entry.Project != opts.Project {
+			continue
+		}
+		if len(opts.Kinds) > 0 && !containsKind(opts.Kinds, entry.Kind) {
+			continue
+		}
+		if len(opts.Tags) > 0 && !containsAllTags(entry.Tags, opts.Tags) {
 			continue
 		}
 		results = append(results, lore.SearchHit{Entry: entry, Score: scored.Score})
 	}
 
 	return results, nil
+}
+
+// containsKind reports whether want contains kind.
+func containsKind(want []lore.Kind, kind lore.Kind) bool {
+	for _, k := range want {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAllTags reports whether entryTags contains every tag in required.
+// Membership is intersection: required={"a","b"} demands the entry have BOTH.
+func containsAllTags(entryTags, required []string) bool {
+	have := make(map[string]struct{}, len(entryTags))
+	for _, t := range entryTags {
+		have[t] = struct{}{}
+	}
+	for _, r := range required {
+		if _, ok := have[r]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // runBM25 executes the BM25 arm and returns a slice of entry IDs in rank order.

@@ -38,8 +38,8 @@ CREATE TABLE IF NOT EXISTS edges (
   weight     REAL    NOT NULL DEFAULT 0,
   created_at TEXT    NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (from_id, to_id, relation),
-  FOREIGN KEY (from_id) REFERENCES entries(id),
-  FOREIGN KEY (to_id)   REFERENCES entries(id)
+  FOREIGN KEY (from_id) REFERENCES entries(id) ON DELETE CASCADE,
+  FOREIGN KEY (to_id)   REFERENCES entries(id) ON DELETE CASCADE
 );
 
 -- ---------------------------------------------------------------------------
