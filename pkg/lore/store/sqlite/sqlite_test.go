@@ -508,7 +508,7 @@ func TestListEdges_FromID(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	}
-	// Add edge from ids[1] to ids[2] — should NOT appear in ids[0] list.
+	// Add edge from ids[1] to ids[2]. Should NOT appear in ids[0] list.
 	if err := st.AddEdge(ctx, lore.Edge{FromID: ids[1], ToID: ids[2], Relation: "informs"}); err != nil {
 		t.Fatalf("AddEdge ids[1]->ids[2]: %v", err)
 	}
