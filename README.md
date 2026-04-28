@@ -170,11 +170,6 @@ originally built inside [`mathomhaus/guild`](https://github.com/mathomhaus/guild
 Guild remains the opinionated agent-coordination platform that adds
 quest, oath, and brief on top of these primitives.
 
-## Spec
-
-The architectural rationale and product positioning that informs this library
-lives in the maintainer's notes at
-`~/Library/CloudStorage/SynologyDrive-Obsidian/Personal/01 Projects/Agent Guild/Positioning/lore-product-mvp-2026-04-27.md`.
 
 ## License
 
