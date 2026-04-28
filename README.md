@@ -283,6 +283,103 @@ override the default search path. When the library is absent, `bge.New` returns
 Implement the `embed.Embedder` interface to swap in a remote embedding API or a
 different model without changing any retrieval code.
 
+## Retriever: hybrid BM25 + vector search
+
+`pkg/lore/retrieve` defines the `Retriever` interface. The reference
+implementation in `pkg/lore/retrieve/hybrid` fuses BM25 lexical search
+(via `Store.SearchText`) and vector nearest-neighbour search (via
+`Embedder.Embed` + `VectorStore.Search`) using Reciprocal Rank Fusion
+(RRF, k=60). This approach avoids tuning score scales across rankers:
+only ordinal rank positions matter.
+
+```go
+import (
+    "context"
+    "database/sql"
+    "fmt"
+    "log"
+
+    _ "modernc.org/sqlite"
+
+    "github.com/mathomhaus/lore/pkg/lore"
+    "github.com/mathomhaus/lore/pkg/lore/embed/bge"
+    "github.com/mathomhaus/lore/pkg/lore/retrieve/hybrid"
+    "github.com/mathomhaus/lore/pkg/lore/store/sqlite"
+    "github.com/mathomhaus/lore/pkg/lore/vector/sqlitevec"
+)
+
+func search(db *sql.DB, query string) ([]lore.SearchHit, error) {
+    // Store handles BM25.
+    st, err := sqlite.New(db)
+    if err != nil {
+        return nil, err
+    }
+    defer st.Close(context.Background())
+
+    // Embedder handles query vectorisation.
+    emb, err := bge.New()
+    if err != nil {
+        // ErrUnsupported on platforms without ONNX Runtime: use BM25-only.
+        log.Printf("warn: embedder unavailable, using BM25 only: %v", err)
+        emb = nil
+    }
+    if emb != nil {
+        defer emb.Close(context.Background())
+    }
+
+    // VectorStore handles nearest-neighbour lookup.
+    vs, err := sqlitevec.New(db, 384)
+    if err != nil {
+        return nil, err
+    }
+    defer vs.Close(context.Background())
+
+    r := hybrid.New(st, emb, vs,
+        hybrid.WithRRFK(60),
+        hybrid.WithCandidatePoolSize(50),
+    )
+
+    return r.Search(context.Background(), query, lore.SearchOpts{Limit: 10})
+}
+```
+
+The hybrid retriever tolerates partial failures gracefully:
+
+- If `Embedder.Embed` returns an error (e.g. `embed.ErrUnsupported`), the vector
+  arm is skipped and BM25 results are returned alone.
+- If `VectorStore.Search` returns an error, the BM25 arm continues independently.
+- Only when both arms fail does `Search` return an error.
+
+When the embedder is nil, pass a no-op stub or use `bm25.New(store)` directly:
+
+```go
+import "github.com/mathomhaus/lore/pkg/lore/retrieve/bm25"
+
+r := bm25.New(st)
+hits, err := r.Search(ctx, "deployment rollout", lore.SearchOpts{Limit: 10})
+```
+
+### RRF algorithm
+
+`pkg/lore/retrieve/rrf` exposes `Fuse(rankings [][]int64, k int) []ScoredID`
+for callers that want to run their own ranked lists through RRF without the
+hybrid retriever:
+
+```go
+import "github.com/mathomhaus/lore/pkg/lore/retrieve/rrf"
+
+bm25IDs := []int64{10, 20, 30}
+vecIDs  := []int64{20, 10, 40}
+
+fused := rrf.Fuse([][]int64{bm25IDs, vecIDs}, rrf.DefaultK)
+for _, s := range fused {
+    fmt.Printf("id=%d score=%.4f\n", s.ID, s.Score)
+}
+```
+
+Output is sorted by descending score; ties break by ascending ID for
+determinism.
+
 ## Attribution
 
 Lore extracts and generalizes the storage, embedding, and retrieval primitives
