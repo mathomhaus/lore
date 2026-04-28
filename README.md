@@ -113,6 +113,56 @@ upgrading, and expect occasional breakage on `main`.
 
 Lore is the substrate. Everything above is a consumer's choice.
 
+## VectorStore
+
+`pkg/lore/vector` defines the `VectorStore` interface. The reference
+implementation in `pkg/lore/vector/sqlitevec` stores vectors as BLOB columns
+inside your existing `*sql.DB` and runs cosine similarity entirely in Go
+(no CGO, no extensions).
+
+```go
+import (
+    "context"
+    "database/sql"
+
+    _ "modernc.org/sqlite"
+
+    "github.com/mathomhaus/lore/pkg/lore/vector"
+    "github.com/mathomhaus/lore/pkg/lore/vector/sqlitevec"
+)
+
+db, _ := sql.Open("sqlite", "lore.db")
+
+// Bind to a 384-dimension space (BGE-small-en-v1.5).
+store, err := sqlitevec.New(db, 384)
+if err != nil {
+    // handle
+}
+defer store.Close(context.Background())
+
+ctx := context.Background()
+
+// Store a vector.
+vec := make([]float32, 384) // fill from your Embedder
+_ = store.Upsert(ctx, entryID, vec)
+
+// Search: returns top-5 hits in descending cosine similarity order.
+hits, err := store.Search(ctx, queryVec, vector.SearchOpts{Limit: 5})
+for _, h := range hits {
+    fmt.Printf("entry %d score %.4f\n", h.ID, h.Score)
+}
+```
+
+Kind and tag filters in `SearchOpts` are advisory. The sqlitevec reference
+implementation does not apply them (a full-table-scan store has no efficient
+join). Post-filter results via your `Store.Get` call or swap in a
+VectorStore that understands your schema.
+
+Scale: the reference impl performs a full linear scan. Acceptable for up to
+roughly 100K vectors of 384 dimensions (benchmark: ~100ms on Apple M3 Pro).
+Beyond that, implement `VectorStore` with pgvector, Qdrant, or a native
+sqlite-vec extension backend.
+
 ## Attribution
 
 Lore extracts and generalizes the storage, embedding, and retrieval primitives
