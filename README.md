@@ -99,6 +99,80 @@ The `store.Store` interface is backend-agnostic. Swap `sqlite.New` for any
 implementation that satisfies the interface to use a different storage engine
 without changing callers.
 
+### Path B: document ingestion
+
+Path B ingests existing Markdown document trees into lore entries. The
+ingester is a pure functional transform: it returns entries and the caller
+writes them to a Store.
+
+```go
+import (
+    "context"
+    "log"
+
+    "github.com/mathomhaus/lore/pkg/lore/ingest/heuristic"
+)
+
+func main() {
+    ing := heuristic.NewIngester()
+
+    result, err := ing.Process(context.Background(), "/workspace/docs")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, fe := range result.Errors {
+        log.Printf("warn: %v", fe)
+    }
+
+    for _, e := range result.Entries {
+        log.Printf("entry kind=%s title=%q source=%s", e.Kind, e.Title, e.Source)
+        // write e to your store here
+    }
+}
+```
+
+#### Classification priority
+
+The heuristic ingester classifies each chunk using this priority order (first
+match wins):
+
+1. YAML front matter with an explicit `kind:` field.
+2. Path rules: `docs/adr/*.md` maps to decision+adr; `docs/runbooks/*.md`
+   maps to procedure+runbook; `CLAUDE.md`/`agents.md`/`skills.md` map to
+   reference+agent-config; and so on. See `heuristic.DefaultRules()`.
+3. Heading keywords: `## What is` maps to explanation; `## Decision` /
+   `## Context` / `## Consequences` maps to decision; `## Procedure` /
+   `## Steps` maps to procedure; etc.
+4. Fallback: kind=research (catch-all).
+
+#### Customizing rules
+
+```go
+import "github.com/mathomhaus/lore/pkg/lore/ingest/heuristic"
+
+rules := heuristic.DefaultRules()
+rules = append(rules, heuristic.Rule{
+    PathGlob: "docs/specs/*.md",
+    Kind:     lore.KindDecision,
+    Tags:     []string{"spec"},
+})
+
+ing := heuristic.NewIngester(
+    heuristic.WithRules(rules),
+    heuristic.WithLogger(slog.Default()),
+)
+```
+
+#### Walker behavior (v0.1.1)
+
+- Only `.md` and `.markdown` files are processed.
+- `.git/`, `node_modules/`, `vendor/`, and any hidden directory (name
+  starting with `.`) are skipped unconditionally.
+- Files larger than 10 MB are skipped with a FileError.
+- Symlinks are not followed.
+- `.gitignore` patterns are not honored (planned for v0.2).
+
 ## Status: pre-v1.0
 
 Lore is pre-v1.0. The exported surface is stable in shape but may change in
