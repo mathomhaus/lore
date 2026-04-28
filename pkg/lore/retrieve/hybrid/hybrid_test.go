@@ -258,7 +258,7 @@ func TestHybrid_BothBeats(t *testing.T) {
 	}
 	// Both found: this is the "hybrid beats single-mode" condition.
 	if !foundMigration || !foundDeployment {
-		t.Logf("partial coverage (migration=%v, deployment=%v) — acceptable with small corpus", foundMigration, foundDeployment)
+		t.Logf("partial coverage (migration=%v, deployment=%v); acceptable with small corpus", foundMigration, foundDeployment)
 	}
 }
 
