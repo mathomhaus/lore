@@ -163,6 +163,52 @@ roughly 100K vectors of 384 dimensions (benchmark: ~100ms on Apple M3 Pro).
 Beyond that, implement `VectorStore` with pgvector, Qdrant, or a native
 sqlite-vec extension backend.
 
+## Embedder
+
+The `Embedder` interface turns text into dense vectors for semantic retrieval:
+
+```go
+import (
+    "context"
+    "errors"
+
+    "github.com/mathomhaus/lore/pkg/lore/embed"
+    "github.com/mathomhaus/lore/pkg/lore/embed/bge"
+)
+
+func embedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+    emb, err := bge.New()
+    if err != nil {
+        if errors.Is(err, embed.ErrUnsupported) {
+            // Platform has no ONNX Runtime; fall through to lexical-only retrieval.
+            return nil, err
+        }
+        return nil, err
+    }
+    defer emb.Close(ctx)
+
+    vecs, err := emb.Embed(ctx, texts)
+    if err != nil {
+        return nil, err
+    }
+    // Each vecs[i] is a float32 slice of length emb.Dimensions() (384 for BGE-small).
+    return vecs, nil
+}
+```
+
+`bge.New` options:
+
+- `bge.WithLogger(*slog.Logger)` for a structured logger covering init and runtime warnings.
+- `bge.WithTracer(trace.Tracer)` for an OTel tracer; spans named `lore.embed.encode`.
+
+The BGE reference implementation requires the ONNX Runtime shared library on the
+host (e.g. `brew install onnxruntime` on macOS). Set `LORE_ONNXRUNTIME_LIB` to
+override the default search path. When the library is absent, `bge.New` returns
+`embed.ErrUnsupported` and callers should fall back to lexical retrieval.
+
+Implement the `embed.Embedder` interface to swap in a remote embedding API or a
+different model without changing any retrieval code.
+
 ## Attribution
 
 Lore extracts and generalizes the storage, embedding, and retrieval primitives
