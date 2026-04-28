@@ -1,0 +1,37 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test, coverage, profiling
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+coverage.out
+
+# Go workspace and toolchain caches
+go.work
+go.work.sum
+.go-cache/
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / local config
+.env
+.env.local
+
+# Local scratch
+/tmp/
+/scratch/
