@@ -37,7 +37,7 @@ type Rule struct {
 //   - *.md in project root               reference (catch-wide-root)
 func DefaultRules() []Rule {
 	return []Rule{
-		// ADRs — architectural decision records.
+		// ADRs (architectural decision records).
 		{PathGlob: "docs/adr/*.md", Kind: lore.KindDecision, Tags: []string{"adr"}},
 		{PathGlob: "docs/adr/*.markdown", Kind: lore.KindDecision, Tags: []string{"adr"}},
 		{PathGlob: "docs/decisions/*.md", Kind: lore.KindDecision, Tags: []string{"adr"}},
@@ -71,7 +71,7 @@ func DefaultRules() []Rule {
 		{PathGlob: "CONTRIBUTING.md", Kind: lore.KindProcedure, Tags: []string{"contributing"}},
 		{PathGlob: "CONTRIBUTING.markdown", Kind: lore.KindProcedure, Tags: []string{"contributing"}},
 
-		// Changelog — records of what changed.
+		// Changelog: records of what changed.
 		{PathGlob: "CHANGELOG.md", Kind: lore.KindObservation, Tags: []string{"changelog"}},
 		{PathGlob: "CHANGELOG.markdown", Kind: lore.KindObservation, Tags: []string{"changelog"}},
 	}

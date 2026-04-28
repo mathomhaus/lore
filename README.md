@@ -1,392 +1,253 @@
 # lore
 
-A structured knowledge primitive for AI agents. Apache 2.0 OSS Go library.
+Lore is a structured knowledge library for AI agents. It stores classified
+entries (decisions, principles, procedures, references, explanations,
+observations, research, ideas) and the edges between them, then serves
+them to retrieval pipelines that combine lexical and semantic ranking.
 
-Lore stores classified knowledge entries (decisions, principles, procedures,
-references, explanations, observations, research, ideas) and the typed edges
-that connect them, then serves them back to retrieval pipelines that combine
-lexical and semantic ranking. It ships as a Go library, not a service: callers
-compose it into their own MCP servers, HTTP services, ingestion pipelines, or
-CLI tools.
-
-The library is built around three pluggable interfaces (`Store`, `Embedder`,
-`VectorStore`) plus a composing `Retriever` and an optional `Ingester`. Each
-interface ships with an in-process reference implementation (modernc.org/sqlite,
-BGE int8, sqlite-vec) so a single binary can run against a local SQLite file
-out of the box. Swap any of the three for Postgres, a remote embedding API,
-pgvector, or anything else by implementing the interface.
+Lore ships as a Go library, not a service. Callers compose it into their own
+MCP servers, HTTP services, ingestion pipelines, or CLI tools. Three pluggable
+interfaces (`Store`, `Embedder`, `VectorStore`) each have an in-process
+reference implementation that runs against a local SQLite file out of the box.
+Swap any of the three for Postgres, a remote embedding API, or a purpose-built
+vector database by satisfying the interface.
 
 ## Install
 
 ```
-go get github.com/mathomhaus/lore@latest
+go get github.com/mathomhaus/lore@v0.1.1
 ```
 
 Requires Go 1.23 or newer.
 
-## Usage
+## Quickstart
 
-### Store: persist and retrieve entries
-
-The `store.Store` interface is the primary write and read surface. Open a
-`*sql.DB` with the `"sqlite"` driver (registered by `modernc.org/sqlite`),
-pass it to `sqlite.New`, and the constructor runs schema migrations
-automatically.
+The example below wires the three reference implementations together, inscribes
+an entry, embeds it into the vector store, and runs a hybrid search.
 
 ```go
+package main
+
 import (
-    "context"
-    "database/sql"
-    "fmt"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
 
-    _ "modernc.org/sqlite"
+	_ "modernc.org/sqlite"
 
-    "github.com/mathomhaus/lore/pkg/lore"
-    "github.com/mathomhaus/lore/pkg/lore/store/sqlite"
+	"github.com/mathomhaus/lore/pkg/lore"
+	"github.com/mathomhaus/lore/pkg/lore/embed"
+	"github.com/mathomhaus/lore/pkg/lore/embed/bge"
+	"github.com/mathomhaus/lore/pkg/lore/retrieve/hybrid"
+	"github.com/mathomhaus/lore/pkg/lore/store/sqlite"
+	"github.com/mathomhaus/lore/pkg/lore/vector/sqlitevec"
 )
 
 func main() {
-    dsn := "lore.db" +
-        "?_pragma=journal_mode(WAL)" +
-        "&_pragma=busy_timeout(5000)" +
-        "&_pragma=synchronous(NORMAL)" +
-        "&_pragma=foreign_keys(ON)"
+	ctx := context.Background()
 
-    db, err := sql.Open("sqlite", dsn)
-    if err != nil {
-        panic(err)
-    }
-    defer db.Close()
+	// Open a single SQLite file. All three backends share the same DB.
+	dsn := "knowledge.db" +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(ON)"
 
-    st, err := sqlite.New(db)
-    if err != nil {
-        panic(err)
-    }
-    defer st.Close(context.Background())
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
 
-    // Persist a decision.
-    id, err := st.Inscribe(context.Background(), lore.Entry{
-        Project: "myproject",
-        Kind:    lore.KindDecision,
-        Title:   "Use SQLite for local persistence",
-        Body:    "Chosen for zero-dependency deployment and strong ACID guarantees.",
-        Tags:    []string{"adr", "storage"},
-    })
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println("inscribed", id)
+	// Store: handles entry persistence and BM25 full-text search.
+	st, err := sqlite.New(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer st.Close(ctx)
 
-    // Retrieve it.
-    entry, err := st.Get(context.Background(), id)
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println(entry.Title)
+	// VectorStore: stores and queries float32 vectors (384-dim for BGE-small).
+	vs, err := sqlitevec.New(db, 384)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer vs.Close(ctx)
 
-    // Full-text search.
-    hits, err := st.SearchText(context.Background(), "SQLite persistence", lore.SearchOpts{Limit: 5})
-    if err != nil {
-        panic(err)
-    }
-    for _, h := range hits {
-        fmt.Printf("%.3f  %s\n", h.Score, h.Entry.Title)
-    }
+	// Embedder: in-process BGE int8 model. Falls back gracefully on platforms
+	// without ONNX Runtime.
+	var emb embed.Embedder
+	emb, err = bge.New()
+	if err != nil {
+		if !errors.Is(err, embed.ErrUnsupported) {
+			log.Fatal(err)
+		}
+		log.Print("embedder unavailable; using BM25-only retrieval")
+		emb = nil
+	}
+	if emb != nil {
+		defer emb.Close(ctx)
+	}
+
+	// Inscribe a decision entry.
+	id, err := st.Inscribe(ctx, lore.Entry{
+		Project: "decisionLog",
+		Kind:    lore.KindDecision,
+		Title:   "Use SQLite for local persistence",
+		Body:    "Chosen for zero-dependency deployment and strong ACID guarantees under single-writer workloads.",
+		Tags:    []string{"adr", "storage"},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("inscribed entry id=%d\n", id)
+
+	// Embed and store the vector for the new entry if an embedder is available.
+	if emb != nil {
+		entry, _ := st.Get(ctx, id)
+		vecs, err := emb.Embed(ctx, []string{entry.Title + " " + entry.Body})
+		if err == nil {
+			_ = vs.Upsert(ctx, id, vecs[0])
+		}
+	}
+
+	// Build a hybrid retriever that fuses BM25 + vector via RRF.
+	r := hybrid.New(st, emb, vs,
+		hybrid.WithRRFK(60),
+		hybrid.WithCandidatePoolSize(50),
+	)
+
+	// Search.
+	hits, err := r.Search(ctx, "SQLite persistence decision", lore.SearchOpts{
+		Project: "decisionLog",
+		Limit:   5,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, h := range hits {
+		fmt.Printf("%.4f  %s\n", h.Score, h.Entry.Title)
+	}
 }
 ```
 
-The `store.Store` interface is backend-agnostic. Swap `sqlite.New` for any
-implementation that satisfies the interface to use a different storage engine
-without changing callers.
+## What lore is
 
-### Path B: document ingestion
+Lore exposes three pluggable interfaces:
 
-Path B ingests existing Markdown document trees into lore entries. The
-ingester is a pure functional transform: it returns entries and the caller
-writes them to a Store.
+**Store** (`pkg/lore/store`) persists entries and edges. The reference
+implementation in `pkg/lore/store/sqlite` uses `modernc.org/sqlite` (pure Go)
+with FTS5 for BM25 full-text search. Replace it with Postgres, MySQL, or any
+other engine by satisfying the interface.
 
-```go
-import (
-    "context"
-    "log"
+**Embedder** (`pkg/lore/embed`) turns text into dense vectors. The reference
+implementation in `pkg/lore/embed/bge` runs an int8-quantized BGE-small-en-v1.5
+model in process via ONNX Runtime. Replace it with a remote embedding API or a
+different local model without changing retrieval logic.
 
-    "github.com/mathomhaus/lore/pkg/lore/ingest/heuristic"
-)
+**VectorStore** (`pkg/lore/vector`) stores and queries float32 vectors. The
+reference implementation in `pkg/lore/vector/sqlitevec` stores vectors as BLOB
+columns in the same SQLite file and does cosine similarity in Go (no CGO, no
+extensions). Replace it with pgvector, Qdrant, or a native extension backend.
 
-func main() {
-    ing := heuristic.NewIngester()
+On top of these three, lore composes a **Retriever** (`pkg/lore/retrieve`) that
+fuses BM25 lexical and vector semantic rankings via Reciprocal Rank Fusion (RRF,
+k=60). An **Ingester** (`pkg/lore/ingest`) optionally walks document trees and
+classifies chunks into entries (Path B).
 
-    result, err := ing.Process(context.Background(), "/workspace/docs")
-    if err != nil {
-        log.Fatal(err)
-    }
+Two write paths:
 
-    for _, fe := range result.Errors {
-        log.Printf("warn: %v", fe)
-    }
-
-    for _, e := range result.Entries {
-        log.Printf("entry kind=%s title=%q source=%s", e.Kind, e.Title, e.Source)
-        // write e to your store here
-    }
-}
-```
-
-#### Classification priority
-
-The heuristic ingester classifies each chunk using this priority order (first
-match wins):
-
-1. YAML front matter with an explicit `kind:` field.
-2. Path rules: `docs/adr/*.md` maps to decision+adr; `docs/runbooks/*.md`
-   maps to procedure+runbook; `CLAUDE.md`/`agents.md`/`skills.md` map to
-   reference+agent-config; and so on. See `heuristic.DefaultRules()`.
-3. Heading keywords: `## What is` maps to explanation; `## Decision` /
-   `## Context` / `## Consequences` maps to decision; `## Procedure` /
-   `## Steps` maps to procedure; etc.
-4. Fallback: kind=research (catch-all).
-
-#### Customizing rules
-
-```go
-import "github.com/mathomhaus/lore/pkg/lore/ingest/heuristic"
-
-rules := heuristic.DefaultRules()
-rules = append(rules, heuristic.Rule{
-    PathGlob: "docs/specs/*.md",
-    Kind:     lore.KindDecision,
-    Tags:     []string{"spec"},
-})
-
-ing := heuristic.NewIngester(
-    heuristic.WithRules(rules),
-    heuristic.WithLogger(slog.Default()),
-)
-```
-
-#### Walker behavior (v0.1.1)
-
-- Only `.md` and `.markdown` files are processed.
-- `.git/`, `node_modules/`, `vendor/`, and any hidden directory (name
-  starting with `.`) are skipped unconditionally.
-- Files larger than 10 MB are skipped with a FileError.
-- Symlinks are not followed.
-- `.gitignore` patterns are not honored (planned for v0.2).
-
-## Status: pre-v1.0
-
-Lore is pre-v1.0. The exported surface is stable in shape but may change in
-detail between minor versions. Pin to a version, read release notes before
-upgrading, and expect occasional breakage on `main`.
+- **Path A (agent inscribe):** an agent calls `Store.Inscribe` directly, then
+  `Embedder.Embed` + `VectorStore.Upsert`. No document parsing, no LLM cost.
+  High-frequency path suitable for session-level knowledge capture.
+- **Path B (document ingestion):** `Ingester.Process` walks a directory, chunks
+  Markdown files, classifies each chunk (YAML front matter, then path rules,
+  then heading patterns, then fallback to `research`), and returns entries. The
+  caller writes them to a Store. Suitable for bulk ingestion of existing docs.
 
 ## What lore is not
 
-- Not a CLI binary. Not an MCP server. Not an HTTP server. Not a UI.
-- Not a hosted service. Not multi-tenant. Not an LLM client.
+- Not a CLI binary.
+- Not an MCP server.
+- Not an HTTP server.
+- Not a UI.
+- Not a hosted service.
+- Not multi-tenant (all isolation is caller-provided via the `Project` field).
+- Not an LLM client.
 - Not a replacement for a full retrieval-augmented-generation framework.
 
-Lore is the substrate. Everything above is a consumer's choice.
+Lore is the substrate. Everything above is a consumer's responsibility.
 
-## VectorStore
+## Production deployment patterns
 
-`pkg/lore/vector` defines the `VectorStore` interface. The reference
-implementation in `pkg/lore/vector/sqlitevec` stores vectors as BLOB columns
-inside your existing `*sql.DB` and runs cosine similarity entirely in Go
-(no CGO, no extensions).
+Because lore accepts caller-owned `*sql.DB` instances rather than connection
+strings, it maps cleanly to multi-replica Kubernetes deployments. A typical
+consumer service structure uses three stateless Deployments:
 
-```go
-import (
-    "context"
-    "database/sql"
+**Ingester worker** reads source documents from a queue (Pub/Sub, SQS, or a
+database queue table), calls `Ingester.Process`, and writes the returned entries
+to a shared `Store`. One or more replicas; only requires write access to the
+database.
 
-    _ "modernc.org/sqlite"
+**Query API service** receives search queries over HTTP or gRPC. It opens a
+read-optimized `*sql.DB` connection pool (WAL mode allows concurrent readers),
+constructs a `Store` + `Embedder` + `VectorStore`, wires them into a `Retriever`,
+and returns ranked hits. Scales horizontally; each replica is stateless.
 
-    "github.com/mathomhaus/lore/pkg/lore/vector"
-    "github.com/mathomhaus/lore/pkg/lore/vector/sqlitevec"
-)
+**MCP gateway** exposes lore to AI agent harnesses via the Model Context
+Protocol. It wraps the same `Store` + `Retriever` in tool handlers for
+`inscribe`, `search`, and `list`. The library provides the knowledge primitives;
+the MCP surface is the consumer's thin adaptation layer.
 
-db, _ := sql.Open("sqlite", "lore.db")
+All three Deployments can share a single underlying SQLite file (via a network
+volume or single-writer proxy) or migrate to Postgres by swapping the `Store`
+and `VectorStore` implementations. No code changes are required in the consumer
+services when backends are swapped.
 
-// Bind to a 384-dimension space (BGE-small-en-v1.5).
-store, err := sqlitevec.New(db, 384)
-if err != nil {
-    // handle
-}
-defer store.Close(context.Background())
+## Reference implementations
 
-ctx := context.Background()
+| Package | Role | Backend | Scale guidance |
+|---|---|---|---|
+| `pkg/lore/store/sqlite` | Store | modernc.org/sqlite + FTS5 | Suitable for most single-service workloads |
+| `pkg/lore/embed/bge` | Embedder | BGE-small-en-v1.5 int8 via ONNX Runtime | Requires ONNX Runtime dylib; pure CPU |
+| `pkg/lore/vector/sqlitevec` | VectorStore | SQLite BLOB + Go cosine scan | Good to ~100K vectors of 384 dim (~100ms scan on modern hardware) |
+| `pkg/lore/retrieve/hybrid` | Retriever | BM25 + vector via RRF | Inherits limits of Store + VectorStore |
+| `pkg/lore/retrieve/bm25` | Retriever (lexical only) | Store.SearchText | No embedder required |
+| `pkg/lore/ingest/heuristic` | Ingester | Rule-based heuristic classifier | Pure Go; no LLM cost |
 
-// Store a vector.
-vec := make([]float32, 384) // fill from your Embedder
-_ = store.Upsert(ctx, entryID, vec)
+All reference implementations are pure Go with no CGO requirement. The BGE
+embedder uses `purego` for ONNX Runtime binding rather than CGO.
 
-// Search: returns top-5 hits in descending cosine similarity order.
-hits, err := store.Search(ctx, queryVec, vector.SearchOpts{Limit: 5})
-for _, h := range hits {
-    fmt.Printf("entry %d score %.4f\n", h.ID, h.Score)
-}
-```
+## Configuration
 
-Kind and tag filters in `SearchOpts` are advisory. The sqlitevec reference
-implementation does not apply them (a full-table-scan store has no efficient
-join). Post-filter results via your `Store.Get` call or swap in a
-VectorStore that understands your schema.
+**Logger.** Pass `WithLogger(*slog.Logger)` to any constructor. Defaults to
+`slog.Default()`.
 
-Scale: the reference impl performs a full linear scan. Acceptable for up to
-roughly 100K vectors of 384 dimensions (benchmark: ~100ms on Apple M3 Pro).
-Beyond that, implement `VectorStore` with pgvector, Qdrant, or a native
-sqlite-vec extension backend.
+**Tracer.** Pass `WithTracer(trace.Tracer)` to enable OpenTelemetry spans.
+Defaults to the global tracer provider (`otel.GetTracerProvider()`). Wire an
+exporter in your service bootstrap to send traces to your backend of choice.
 
-## Embedder
+Span names follow the pattern `lore.<package>.<operation>` (for example
+`lore.store.inscribe`, `lore.vector.search`, `lore.retrieve.search`).
 
-The `Embedder` interface turns text into dense vectors for semantic retrieval:
+**BGE embedder.** Set `LORE_ONNXRUNTIME_LIB` to override the default shared
+library search path. On macOS: `brew install onnxruntime` puts the dylib where
+the probe expects it. When the library is absent, `bge.New` returns
+`embed.ErrUnsupported` and callers should fall back to lexical-only retrieval.
 
-```go
-import (
-    "context"
-    "errors"
+## Stability
 
-    "github.com/mathomhaus/lore/pkg/lore/embed"
-    "github.com/mathomhaus/lore/pkg/lore/embed/bge"
-)
-
-func embedTexts(ctx context.Context, texts []string) ([][]float32, error) {
-    emb, err := bge.New()
-    if err != nil {
-        if errors.Is(err, embed.ErrUnsupported) {
-            // Platform has no ONNX Runtime; fall through to lexical-only retrieval.
-            return nil, err
-        }
-        return nil, err
-    }
-    defer emb.Close(ctx)
-
-    vecs, err := emb.Embed(ctx, texts)
-    if err != nil {
-        return nil, err
-    }
-    // Each vecs[i] is a float32 slice of length emb.Dimensions() (384 for BGE-small).
-    return vecs, nil
-}
-```
-
-`bge.New` options:
-
-- `bge.WithLogger(*slog.Logger)` for a structured logger covering init and runtime warnings.
-- `bge.WithTracer(trace.Tracer)` for an OTel tracer; spans named `lore.embed.encode`.
-
-The BGE reference implementation requires the ONNX Runtime shared library on the
-host (e.g. `brew install onnxruntime` on macOS). Set `LORE_ONNXRUNTIME_LIB` to
-override the default search path. When the library is absent, `bge.New` returns
-`embed.ErrUnsupported` and callers should fall back to lexical retrieval.
-
-Implement the `embed.Embedder` interface to swap in a remote embedding API or a
-different model without changing any retrieval code.
-
-## Retriever: hybrid BM25 + vector search
-
-`pkg/lore/retrieve` defines the `Retriever` interface. The reference
-implementation in `pkg/lore/retrieve/hybrid` fuses BM25 lexical search
-(via `Store.SearchText`) and vector nearest-neighbour search (via
-`Embedder.Embed` + `VectorStore.Search`) using Reciprocal Rank Fusion
-(RRF, k=60). This approach avoids tuning score scales across rankers:
-only ordinal rank positions matter.
-
-```go
-import (
-    "context"
-    "database/sql"
-    "fmt"
-    "log"
-
-    _ "modernc.org/sqlite"
-
-    "github.com/mathomhaus/lore/pkg/lore"
-    "github.com/mathomhaus/lore/pkg/lore/embed/bge"
-    "github.com/mathomhaus/lore/pkg/lore/retrieve/hybrid"
-    "github.com/mathomhaus/lore/pkg/lore/store/sqlite"
-    "github.com/mathomhaus/lore/pkg/lore/vector/sqlitevec"
-)
-
-func search(db *sql.DB, query string) ([]lore.SearchHit, error) {
-    // Store handles BM25.
-    st, err := sqlite.New(db)
-    if err != nil {
-        return nil, err
-    }
-    defer st.Close(context.Background())
-
-    // Embedder handles query vectorisation.
-    emb, err := bge.New()
-    if err != nil {
-        // ErrUnsupported on platforms without ONNX Runtime: use BM25-only.
-        log.Printf("warn: embedder unavailable, using BM25 only: %v", err)
-        emb = nil
-    }
-    if emb != nil {
-        defer emb.Close(context.Background())
-    }
-
-    // VectorStore handles nearest-neighbour lookup.
-    vs, err := sqlitevec.New(db, 384)
-    if err != nil {
-        return nil, err
-    }
-    defer vs.Close(context.Background())
-
-    r := hybrid.New(st, emb, vs,
-        hybrid.WithRRFK(60),
-        hybrid.WithCandidatePoolSize(50),
-    )
-
-    return r.Search(context.Background(), query, lore.SearchOpts{Limit: 10})
-}
-```
-
-The hybrid retriever tolerates partial failures gracefully:
-
-- If `Embedder.Embed` returns an error (e.g. `embed.ErrUnsupported`), the vector
-  arm is skipped and BM25 results are returned alone.
-- If `VectorStore.Search` returns an error, the BM25 arm continues independently.
-- Only when both arms fail does `Search` return an error.
-
-When the embedder is nil, pass a no-op stub or use `bm25.New(store)` directly:
-
-```go
-import "github.com/mathomhaus/lore/pkg/lore/retrieve/bm25"
-
-r := bm25.New(st)
-hits, err := r.Search(ctx, "deployment rollout", lore.SearchOpts{Limit: 10})
-```
-
-### RRF algorithm
-
-`pkg/lore/retrieve/rrf` exposes `Fuse(rankings [][]int64, k int) []ScoredID`
-for callers that want to run their own ranked lists through RRF without the
-hybrid retriever:
-
-```go
-import "github.com/mathomhaus/lore/pkg/lore/retrieve/rrf"
-
-bm25IDs := []int64{10, 20, 30}
-vecIDs  := []int64{20, 10, 40}
-
-fused := rrf.Fuse([][]int64{bm25IDs, vecIDs}, rrf.DefaultK)
-for _, s := range fused {
-    fmt.Printf("id=%d score=%.4f\n", s.ID, s.Score)
-}
-```
-
-Output is sorted by descending score; ties break by ascending ID for
-determinism.
+Lore is pre-v1.0. The exported surface is stable in shape but may change in
+detail between minor versions. Pin to a version, read release notes before
+upgrading, and expect occasional breaking changes on minor version bumps.
 
 ## Attribution
 
 Lore extracts and generalizes the storage, embedding, and retrieval primitives
 originally built inside [`mathomhaus/guild`](https://github.com/mathomhaus/guild).
-Guild remains the opinionated agent-coordination platform that adds
-quest, oath, and brief on top of these primitives.
-
+Guild remains the opinionated agent-coordination platform that adds quest, oath,
+and brief on top of these primitives.
 
 ## License
 
